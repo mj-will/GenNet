@@ -69,7 +69,9 @@ from scipy import stats
 from scipy.signal import butter, lfilter
 from scipy.signal import freqs
 
-cuda_dev = "3" # define GPU to use
+from wasserstein_loss import *
+
+cuda_dev = "0" # define GPU to use
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"]=cuda_dev
 
@@ -83,7 +85,7 @@ K.set_session(sess)
 # define some global params
 n_pix = 1024	               # time series size
 n_sig = 1.0                    # the noise standard deviation (default is 1)
-batch_size = 8                 # the GAN batch size (twice this when testing discriminator)
+batch_size = 32                 # the GAN batch size (twice this when testing discriminator)
 pe_batch_size = 8             # The CNN batch size
 max_iter = 500*1000 	       # the maximum number of steps or epochs for GAN waveform network
 pe_iter = 5*100000             # the maximum number of steps or epochs for CNN pe network 
@@ -95,12 +97,13 @@ pe_grain = 95                  # fineness of pe posterior grid (leave this alone
 npar = 2 		       # the number of parameters to estimate TODO: make ability to increase this number
 N_VIEWED = 25                  # number of allowed samples to view when plotting GAN estimated waveforms
 chi_loss = False               # use chisquared loss function in GAN waveform generation
-lr = 9e-5                      # learning rate for all networks
+wass_loss = True
+lr = 1e-4                      # learning rate for all networks
 GW150914 = True                # use lalinference produced GW150914 waveform as event 
 gw150914_tmp = True            # use gw150914-like template waveform as event
 do_old_model = False           # use previously saved model for GAN
 do_contours = True             # plot credibility contours on pe estimates
-do_only_old_pe_model = True    # run previously saved pe model only
+do_only_old_pe_model = True    # un previously saved pe model only
 retrain_pe_mod = False         # retrain an old parameter estimation CNN model
 comb_pe_model = False          # if true: use single NN for PE. if False: use multiple NNs for PE estimation
 contour_cadence = 100          # the cadence of making contour plot outputs (lower cadence takes longer training)
@@ -118,7 +121,7 @@ lalinf_pars = pickle.load(pickle_lalinf_pars)
 
 # the locations of signal files and output directory
 if gw150914_tmp:
-    out_path = '/home/hunter.gabbard/public_html/CBC/mahoGANy/%s_template' % event_name 
+    out_path = '/data/public_html/2107829/PE_gan/%s_template' % event_name 
 
 # define new output folder if not running on an event from lalinference
 # this will be for running over my own generated templates if applicable
@@ -226,7 +229,7 @@ def generator_model():
     weights = 'glorot_uniform' # weight initialization
     alpha = 0.5                # slope for negative inputs to leaky relu activation function
     filtsize = 5 # 10 is best  # filter size for hidden layers
-    num_lays = 5               # number of hidden layers in model
+    num_lays = 2               # number of hidden layers in model
     batchnorm = True           # if True: use batch normalization. if False: do not use
     
     # the first dense layer converts the input (100 random numbers) into
@@ -365,11 +368,11 @@ def signal_pe_model():
     	mc_branch = Conv1D(128, 5, strides=2)(mc_branch)
     	mc_branch = Activation(act)(mc_branch)
 
-    	mc_branch = Conv1D(256, 5, strides=2)(mc_branch)
-    	mc_branch = Activation(act)(mc_branch)
+#    	mc_branch = Conv1D(256, 5, strides=2)(mc_branch)
+#    	mc_branch = Activation(act)(mc_branch)
 
-    	mc_branch = Conv1D(512, 5, strides=2)(mc_branch)
-    	mc_branch = Activation(act)(mc_branch)
+#    	mc_branch = Conv1D(512, 5, strides=2)(mc_branch)
+#    	mc_branch = Activation(act)(mc_branch)
 
     	mc_branch = Flatten()(mc_branch)
 
@@ -388,11 +391,11 @@ def signal_pe_model():
     	q_branch = Conv1D(256, 5, strides=1)(q_branch)
     	q_branch = Activation(act)(q_branch)
 
-    	q_branch = Conv1D(512, 5, strides=2)(q_branch)
-    	q_branch = Activation(act)(q_branch)
+ #   	q_branch = Conv1D(512, 5, strides=2)(q_branch)
+ #   	q_branch = Activation(act)(q_branch)
     
-    	q_branch = Conv1D(1024, 5, strides=2)(q_branch)
-    	q_branch = Activation(act)(q_branch)
+  #  	q_branch = Conv1D(1024, 5, strides=2)(q_branch)
+  #  	q_branch = Activation(act)(q_branch)
 
     	q_branch = Flatten()(q_branch)
 
@@ -491,8 +494,12 @@ def signal_discriminator_model():
     model.add(Flatten())
 
     # the final dense layer has a sigmoid activation and a single output
-    model.add(Dense(1))
-    model.add(Activation('sigmoid'))
+    # TODO: linear for wasserstein
+    if wass_loss:
+	model.add(Dense(1))
+    else:
+	model.add(Dense(1))
+	model.add(Activation('sigmoid'))
     model.summary()
  
     return model
@@ -1099,20 +1106,35 @@ def main():
     # setup extra layer on generator
     data_subtraction_on_generator = generator_after_subtracting_noise(generator, data_subtraction)
     data_subtraction_on_generator.compile(loss='binary_crossentropy', optimizer=Adam(lr=lr, beta_1=0.5), metrics=['accuracy'])
+    # TODO: Names
+    # generator takes (latent_vector)
+    # generator_model(latent_vector) (with critic)
+    #wass_generator, wass_generator_model = get_generator(data_subtraction_on_generator, signal_discriminator, (100,), (n_pix,2,1), Adam())
+    # critic only takes real images (not needed)
+    # critic model take (real_img, latent_vector)
+    # signal_discriminator
+    #_, wass_critic_model = get_critic(data_subtraction_on_generator, signal_discriminator, (100,), (n_pix,2,1), batch_size, Adam())
+
 
     # setup generator training when we pass the output to the signal discriminator
     signal_discriminator_on_generator = generator_containing_signal_discriminator(data_subtraction_on_generator, signal_discriminator)
     set_trainable(signal_discriminator, False)	# set the discriminator as not trainable for this step
-    if not chi_loss:
-        signal_discriminator_on_generator.compile(loss='binary_crossentropy', optimizer=Adam(lr=lr, beta_1=0.5), metrics=['accuracy'])
-    elif chi_loss:
+    if chi_loss:
         signal_discriminator_on_generator.compile(loss=chisquare_Loss, optimizer=Adam(lr=lr, beta_1=0.5), metrics=['accuracy'])
+    elif wass_loss:
+        wass_generator, wass_generator_model = get_generator(data_subtraction_on_generator, signal_discriminator, (100,), (n_pix,2,1), Adam(lr=lr, beta_1=0.5))
+    else:
+        signal_discriminator_on_generator.compile(loss='binary_crossentropy', optimizer=Adam(lr=lr, beta_1=0.5), metrics=['accuracy'])
 
     # setup training on signal discriminator model
     # This uses a binary cross entropy loss since we are just 
     # discriminating between real and fake signals
-    set_trainable(signal_discriminator, True)	# set it back to being trainable
-    signal_discriminator.compile(loss='binary_crossentropy', optimizer=Adam(lr=lr, beta_1=0.5), metrics=['accuracy'])
+    if wass_loss:
+    	set_trainable(signal_discriminator, True)	# set it back to being trainable
+    	_, wass_critic_model = get_critic(data_subtraction_on_generator, signal_discriminator, (100,), (n_pix,2,1), batch_size, Adam(lr=0.001, beta_1=0.5))
+    else:
+    	set_trainable(signal_discriminator, True)	# set it back to being trainable
+    	signal_discriminator.compile(loss='binary_crossentropy', optimizer=Adam(lr=lr, beta_1=0.5), metrics=['accuracy'])
 
     # compile CNN PE point estimater neural network
     if do_pe:
@@ -1235,6 +1257,13 @@ def main():
     ################################################
     # TRAIN GAN WAVEFORM ESTIMATER #################
     ################################################
+   
+    # wasserstein setup
+    if wass_loss:
+	# Adversarial ground truths
+	valid = -np.ones((batch_size, 1)) 	# switching labels seems to work better
+	fake = np.ones((batch_size, 1))
+	dummy = np.zeros((batch_size, 1)) # Dummy gt for gradient penalty
 
     losses = []		      # initailise the losses for plotting 
     beta_score_hist = []      # initialize overlap score history for plotting
@@ -1282,21 +1311,37 @@ def main():
             z = np.copy(signal_batch_images_orig)
             signal_batch_images = np.concatenate((signal_batch_images,z), axis=0)
         signal_batch_images = np.concatenate((signal_batch_images,signal_batch_images_noise), axis=2)
-        sX = np.concatenate((signal_batch_images, subtracted_signals_2d))
-        sX = np.reshape(sX, (sX.shape[0],sX.shape[1],sX.shape[2],1))
 
-        # make labels for real and fake images
-        sy = [1.0] * (batch_size*n_noise_real) + [0.0] * (batch_size*n_noise_real)
+	if wass_loss:
+	    signal_batch_images = np.expand_dims(signal_batch_images, axis=-1)
+	    # train discriminator
+	    for _ in range(5):
+	    	latent_vector = np.random.uniform(size=[batch_size, 100], low=-1.0, high=1.0)
+	    	sd_loss = wass_critic_model.train_on_batch([signal_batch_images, latent_vector], [valid, fake, dummy])
+		#print('updatd D')
+	    # train generator
+	    sg_loss = wass_generator_model.train_on_batch(latent_vector, valid)
 
-        # train only the signal discriminator on the data
-        sd_loss = signal_discriminator.train_on_batch(sX, sy)
+	    losses.append([sg_loss[0], sg_loss[1], sd_loss[0], sd_loss[1]])
 
-	# finally train the generator to make images that look like signals
-        noise = np.random.uniform(size=[batch_size*n_noise_real, 100], low=-1.0, high=1.0)
-        sg_loss = signal_discriminator_on_generator.train_on_batch(noise, [1] * (batch_size*n_noise_real))
+	else:
 
-        # fill in the loss vector for plotting
-        losses.append([sg_loss[0],sg_loss[1],sd_loss[0],sd_loss[1]])
+	    sX = np.concatenate((signal_batch_images, subtracted_signals_2d))
+	    sX = np.reshape(sX, (sX.shape[0],sX.shape[1],sX.shape[2],1))
+
+	    # make labels for real and fake images
+	    sy = [1.0] * (batch_size*n_noise_real) + [0.0] * (batch_size*n_noise_real)
+
+	    # train only the signal discriminator on the data
+	    sd_loss = signal_discriminator.train_on_batch(sX, sy)
+
+	    # finally train the generator to make images that look like signals
+	    noise = np.random.uniform(size=[batch_size*n_noise_real, 100], low=-1.0, high=1.0)
+	    sg_loss = signal_discriminator_on_generator.train_on_batch(noise, [1] * (batch_size*n_noise_real))
+	    # TODO: Add training for wasserstein
+
+	    # fill in the loss vector for plotting
+	    losses.append([sg_loss[0],sg_loss[1],sd_loss[0],sd_loss[1]])
 
 	# output status of GAN training and save results images
 	if ((i % cadence == 0) & (i>0)) or (i == max_iter):
@@ -1310,6 +1355,7 @@ def main():
             # make new generator images
             noise = np.random.uniform(size=[1000, 100], low=-1.0, high=1.0)
             generated_images = generator.predict(noise)
+            print(wass_generator.predict(noise).shape)
 
             # plot GAN waveform estimates
             plot_waveform_est(signal_image,noise_signal,generated_images,out_path,i,zoom=False)
