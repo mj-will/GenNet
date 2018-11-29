@@ -6,21 +6,18 @@ from keras.layers import Input
 from keras.layers.merge import _Merge
 from functools import partial
 
-# TODO: fix this crap
-batch_size = 32
-
 class RandomWeightedAverage(_Merge):
     """Provides a (random) weighted average between real and generated image samples.
 Takes a randomly-weighted average of two tensors. In geometric terms, this outputs a random point on the line
 between each pair of input points."""
+    def __init__(self, batch_size, **kwargs):
+        super(_Merge, self).__init__(**kwargs)
+        self.batch_size = batch_size
+
     def _merge_function(self, inputs):
-	alpha = K.random_uniform((batch_size, 1, 1, 1))
+	alpha = K.random_uniform((self.batch_size, 1, 1, 1))
 	return (alpha * inputs[0]) + ((1 - alpha) * inputs[1])
 
-#def RandomWeightedAverage(batch_size, inputs):
-#    alpha = K.random_uniform((batch_size,1, 1, 1))
-#
-#    return (alpha * inputs[0]) + ((1 - alpha) * inputs[1])
 
 def wasserstein_loss(y_true, y_pred):
     '''
@@ -114,7 +111,7 @@ def get_critic(naked_generator, naked_critic, latent_dim, img_shape, batch_size,
     valid = critic(real_img)
 
     # Construct weighted average between real and fake images
-    interpolated_img = RandomWeightedAverage()([real_img, fake_img])
+    interpolated_img = RandomWeightedAverage(batch_size)([real_img, fake_img])
     # Determine validity of weighted sample
     validity_interpolated = critic(interpolated_img)
 
